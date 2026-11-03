@@ -206,6 +206,8 @@ Dans la ressource, onglet **Environment Variables** :
 
    `TRUSTED_PROXIES` (`REMOTE_ADDR`), `MARIADB_USER`, `MARIADB_DATABASE` et `MARIADB_VERSION` ont une valeur par défaut dans le `compose.yaml` : ne les définir que pour la changer.
 
+   > ATTENTION : Saisir la valeur aléatoire à droite du nom de la variable (pas dans le champ `Comment`) dans le champ avec un oeil.
+
 3. Pour enregistrer chaque variable, cliquer sur le bouton **Update** situé sur sa ligne. Une variable saisie mais non enregistrée avec **Update** est perdue.
 
 > Les variables ne sont prises en compte qu'au **prochain déploiement**.
@@ -227,6 +229,22 @@ Dans la ressource, onglet **Environment Variables** :
 ### 4. Déployer
 
 Cliquer sur **Deploy** (en haut de la ressource), puis suivre les logs du déploiement. Une fois terminé, le site est accessible à l'adresse du sous-domaine.
+
+#### Dépannage : « dependency failed to start: container database … is unhealthy »
+
+Ouvrir les logs du conteneur `database` (onglet **Logs** de la ressource). Si on y lit :
+
+```
+Database is uninitialized and password option is not specified
+```
+
+alors `MARIADB_ROOT_PASSWORD` (ou `MARIADB_PASSWORD`) est **vide ou absent** : MariaDB refuse de démarrer sans mot de passe. Pour corriger :
+
+1. Onglet **Environment Variables** : vérifier que `MARIADB_ROOT_PASSWORD`, `MARIADB_PASSWORD` et `APP_SECRET` ont chacune une **valeur** (voir C, étape 2).
+2. Cliquer sur **Update** sur chaque ligne modifiée.
+3. Cliquer de nouveau sur **Deploy**.
+
+Si le conteneur `database` a déjà démarré une fois avec de mauvais mots de passe, supprimer le volume `database_data` de la ressource avant de redéployer (MariaDB ne relit les mots de passe qu'à la première initialisation). Attention : cela efface les données de la base.
 
 ### 5. MAJ du projet
 
