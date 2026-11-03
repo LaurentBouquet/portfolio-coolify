@@ -1,14 +1,164 @@
+# Héberger un projet Symfony dans Coolify
 
+Démarche en 3 parties, à suivre dans l'ordre :
 
-Dans Coolify,  
-comment créer une ressource de type "Public repository" 
-à partir d'un dépôt Github qui contient un projet Symfony 8.1 
-avec son fichier Docker compose (compose.yaml à la racine du projet Symfony) 
-et pouvoir spécifier son sous-domaine ?
+- **A)** Adapter le projet Symfony
+- **B)** Pousser les modifications sur GitHub
+- **C)** Créer et configurer la ressource dans Coolify
 
-## Procédure dans Coolify
+---
 
-1. **Projet** → choisir l'environnement (ex. *production*) → **+ New Resource**.
+## A) Adapter le projet Symfony
+
+### 1. `compose.yaml`
+
+Remplacer le contenu de `compose.yaml` (à la racine du projet) par :
+
+```yaml
+services:
+  php:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_ENV: prod
+      APP_SECRET: ${APP_SECRET}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-REMOTE_ADDR}
+      DATABASE_URL: mysql://${MARIADB_USER:-app}:${MARIADB_PASSWORD}@database:3306/${MARIADB_DATABASE:-app}?serverVersion=${MARIADB_VERSION:-11.4}.0-MariaDB&charset=utf8mb4
+      # Caddy écoute en HTTP sur le port 80 : le HTTPS est géré par Traefik (Coolify)
+      SERVER_NAME: :80
+    depends_on:
+      database:
+        condition: service_healthy
+
+  database:
+    image: mariadb:${MARIADB_VERSION:-11.4}
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-app}
+      MARIADB_USER: ${MARIADB_USER:-app}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    volumes:
+      - database_data:/var/lib/mysql:rw
+
+volumes:
+  database_data:
+```
+
+Explications :
+
+- `build: .` : l'image du service `php` est construite à partir du `Dockerfile` situé à la racine du projet (voir l'étape suivante).
+- Aucun `ports:` n'est publié : Coolify (via son proxy Traefik) route le trafic vers le port 80 du service `php`.
+- Les `${VARIABLE}` seront renseignées dans Coolify (partie C). `${VARIABLE:-valeur}` définit une valeur par défaut.
+
+### 2. `Dockerfile`
+
+Créer un fichier `Dockerfile` à la racine du projet, avec ce contenu :
+
+```dockerfile
+FROM dunglas/frankenphp:1-php8.4
+
+RUN install-php-extensions intl opcache pdo_mysql zip
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+ENV APP_ENV=prod \
+    FRANKENPHP_CONFIG="worker ./public/index.php" \
+    COMPOSER_ALLOW_SUPERUSER=1
+
+WORKDIR /app
+COPY . .
+
+RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction \
+    && composer dump-env prod \
+    && php bin/console asset-map:compile \
+    && php bin/console cache:warmup \
+    && mkdir -p var && chown -R www-data:www-data var
+
+# Migrations puis démarrage du serveur
+CMD ["sh", "-c", "php bin/console doctrine:migrations:migrate --no-interaction && frankenphp run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+```
+
+Explications :
+
+- Image de base FrankenPHP avec PHP 8.4 et installation des extensions PHP nécessaires (`pdo_mysql` pour MariaDB).
+- `FRANKENPHP_CONFIG="worker ./public/index.php"` active le mode worker de FrankenPHP sur le point d'entrée de Symfony. `symfony/runtime` le détecte automatiquement.
+- Le build installe les dépendances sans les paquets de dev, prépare la configuration de production, compile les assets et réchauffe le cache.
+- Au démarrage du conteneur, les migrations Doctrine sont exécutées, puis le serveur FrankenPHP est lancé.
+
+### 3. `.dockerignore`
+
+Créer un fichier nommé exactement `.dockerignore` à la racine du projet (à côté du `Dockerfile`), avec ce contenu :
+
+```
+.git/
+.idea/
+.vscode/
+vendor/
+var/
+node_modules/
+.env.local
+.env.*.local
+docs/
+```
+
+Explications :
+
+- Ces fichiers ne sont pas copiés dans l'image par le `COPY . .` du `Dockerfile` : dépendances locales (réinstallées par `composer install`), cache, historique Git, et surtout secrets locaux.
+- Ne pas ajouter `.env` : il est nécessaire au build (`composer dump-env prod`).
+
+### 4. Trusted proxies
+
+Dans `config/packages/framework.yaml`, ajouter sous `framework:` :
+
+```yaml
+framework:
+    trusted_proxies: '%env(TRUSTED_PROXIES)%'
+    trusted_headers: ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-forwarded-prefix']
+```
+
+Puis ajouter dans le fichier `.env` (valeur par défaut, committée) :
+
+```
+TRUSTED_PROXIES=
+```
+
+Explications :
+
+- Traefik (le proxy de Coolify) se place devant l'application et transmet les informations de la requête d'origine dans les en-têtes `X-Forwarded-*`. Sans cette configuration, Symfony les ignore et génère des URL en `http` au lieu de `https`.
+- `%env(TRUSTED_PROXIES)%` exige que la variable existe, sinon Symfony s'arrête avec `Environment variable not found: "TRUSTED_PROXIES"`. D'où la ligne vide dans `.env` : en local, il n'y a pas de proxy.
+- En production, `TRUSTED_PROXIES` vaut `REMOTE_ADDR` : le `compose.yaml` (étape 1) lui donne cette valeur par défaut, qui l'emporte sur `.env`. `REMOTE_ADDR` est un mot-clé de Symfony qui fait confiance à l'adresse IP qui se connecte directement au conteneur, c'est-à-dire Traefik. Cela convient car le conteneur n'est joignable que via le proxy de Coolify (aucun `ports:` publié).
+
+---
+
+## B) Pousser les modifications sur GitHub
+
+```sh
+git status
+git add compose.yaml Dockerfile .dockerignore config/packages/framework.yaml .env
+git commit -m "Préparer le déploiement Coolify (FrankenPHP, MariaDB)"
+git push origin main
+```
+
+Explications :
+
+- Coolify déploie ce qui est sur GitHub : tous les fichiers créés ou modifiés en A doivent être poussés sur la branche `main`.
+- `git status` permet de vérifier la liste des fichiers modifiés avant le `git add`.
+- Le dépôt doit être **public**, car la ressource Coolify est de type *Public Repository*.
+- Ne jamais committer de secrets (`.env.local`, mots de passe) : ils se définissent dans Coolify (partie C).
+
+---
+
+## C) Procédure dans Coolify
+
+### 1. Créer la ressource
+
+1. **Projet** → choisir l'environnement (ex. *2026-sio2-portfolio*) → **+ New Resource**.
 
 2. Choisir **Public Repository**.
 
@@ -17,141 +167,47 @@ et pouvoir spécifier son sous-domaine ?
 
 4. Sur l'écran suivant, renseigner la configuration de la ressource :
 
-   - **Build Pack** : **Docker Compose**
    - **Branch** : `main`
+   - **Build Pack** : **Docker Compose**
    - **Base Directory** : `/`
    - **Docker Compose Location** : `/compose.yaml`
 
 5. Cliquer sur **Continue** : la ressource est créée et ouverte sur sa page **Configuration**.
 
-## Définir le sous-domaine
+### 2. Variables d'environnement
 
-1. Dans la ressource, onglet **Configuration**, le champ **Domains** apparaît pour chaque service du compose
-   (ex. service `php` : `https://portfolio.mondomaine.fr`).
+Dans la ressource, onglet **Environment Variables** :
 
-   Si le conteneur n'écoute pas sur le port 80, ajouter le port : `https://portfolio.mondomaine.fr:8080`.
+1. Coolify détecte les `${VARIABLE}` du `compose.yaml` et les liste. Si une variable manque, cliquer sur **+ Add**.
 
-2. Coolify génère le routage Traefik et le certificat Let's Encrypt.
+2. Renseigner la valeur de chaque variable (**Key** / **Value**) :
 
-3. DNS : créer un enregistrement **A** `portfolio` pointant vers l'IP du serveur Coolify.
+   | Variable | Valeur |
+   |---|---|
+   | `APP_SECRET` | chaîne aléatoire (ex. générée avec `openssl rand -hex 32`) |
+   | `MARIADB_PASSWORD` | mot de passe de l'utilisateur applicatif |
+   | `MARIADB_ROOT_PASSWORD` | mot de passe root MariaDB |
 
-## Adapter le projet
+   `TRUSTED_PROXIES` (`REMOTE_ADDR`), `MARIADB_USER`, `MARIADB_DATABASE` et `MARIADB_VERSION` ont une valeur par défaut dans le `compose.yaml` : ne les définir que pour la changer.
 
-Le `compose.yaml` actuel ne contient que la base PostgreSQL : il faut ajouter un service web pour déployer l'application.
+3. Cliquer sur **Save**.
 
-### 1. Service web (`compose.yaml`)
+> Les variables ne sont prises en compte qu'au **prochain déploiement**.
 
-Ajouter un service web (ici FrankenPHP) construit depuis un `Dockerfile`, et remplacer le contenu de `compose.yaml` par :
+### 3. Définir le sous-domaine
 
-   ```yaml
-   services:
-     php:
-       build: .
-       restart: unless-stopped
-       environment:
-         APP_ENV: prod
-         APP_SECRET: ${APP_SECRET}
-         DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB:-app}?serverVersion=16&charset=utf8
-         # Caddy écoute en HTTP sur le port 80 : le HTTPS est géré par Traefik (Coolify)
-         SERVER_NAME: :80
-       depends_on:
-         database:
-           condition: service_healthy
-
-     database:
-       image: postgres:${POSTGRES_VERSION:-16}-alpine
-       restart: unless-stopped
-       environment:
-         POSTGRES_DB: ${POSTGRES_DB:-app}
-         POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-         POSTGRES_USER: ${POSTGRES_USER:-app}
-       healthcheck:
-         test: ["CMD", "pg_isready", "-d", "${POSTGRES_DB:-app}", "-U", "${POSTGRES_USER:-app}"]
-         timeout: 5s
-         retries: 5
-         start_period: 60s
-       volumes:
-         - database_data:/var/lib/postgresql/data:rw
-
-   volumes:
-     database_data:
-   ```
-Aucun `ports:` n'est publié : Coolify route le trafic vers le port 80 du service `php` via Traefik.
-
-Le service `php` apparaît alors dans le champ **Domains** (ex. `https://portfolio.mondomaine.fr`).
-
-### 2. `Dockerfile`
-
-À créer à la racine du projet :
-
-   ```dockerfile
-   FROM dunglas/frankenphp:1-php8.4
-
-   RUN install-php-extensions intl opcache pdo_pgsql zip
-
-   COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
-
-   ENV APP_ENV=prod \
-       APP_RUNTIME=Runtime\\FrankenPhpSymfony\\Runtime \
-       FRANKENPHP_CONFIG="worker ./public/index.php" \
-       COMPOSER_ALLOW_SUPERUSER=1
-
-   WORKDIR /app
-   COPY . .
-
-   RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction \
-       && composer dump-env prod \
-       && php bin/console asset-map:compile \
-       && php bin/console cache:warmup \
-       && mkdir -p var && chown -R www-data:www-data var
-
-   # Migrations puis démarrage du serveur
-   CMD ["sh", "-c", "php bin/console doctrine:migrations:migrate --no-interaction && frankenphp run --config /etc/caddy/Caddyfile --adapter caddyfile"]
-   ```
-Le runtime FrankenPHP nécessite `composer require runtime/frankenphp-symfony`. Sans ce paquet, retirer `APP_RUNTIME` et `FRANKENPHP_CONFIG`.
-
-Ajouter aussi un `.dockerignore` (`vendor/`, `var/`, `.git/`, `.env.local`).
-
-### 3. `compose.override.yaml`
-
-Ne pas l'utiliser en production (réglages de dev uniquement). Il reste dans le dépôt : Docker Compose le charge automatiquement en local, mais pas Coolify, qui n'utilise que le fichier indiqué dans **Docker Compose Location**.
-
-### 4. Variables d'environnement
-
-Définir `APP_SECRET`, `POSTGRES_PASSWORD`, etc. dans l'onglet *Environment Variables* de Coolify.
-
-### 5. Migrations
-
-Déjà exécutées au démarrage par le `CMD` du `Dockerfile` ci-dessus.
-
-### 6. Trusted proxies
-
-Sans cette configuration, Symfony ne tient pas compte des en-têtes `X-Forwarded-*` envoyés par Traefik et génère des URL en `http`.
-
-Dans `config/packages/framework.yaml`, sous `framework:` :
-
-   ```yaml
-   framework:
-       trusted_proxies: '%env(TRUSTED_PROXIES)%'
-       trusted_headers: ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-forwarded-prefix']
-   ```
-
-Puis définir la variable d'environnement (Coolify, ou `environment:` du service `php`) :
+1. Dans l'onglet **Configuration**, le champ **Domains** apparaît pour chaque service du compose. Pour le service `php`, saisir par exemple :
 
    ```
-   TRUSTED_PROXIES=REMOTE_ADDR
+   https://portfolio.app.ndlpavranches.fr
    ```
 
-`REMOTE_ADDR` est un mot-clé spécial de Symfony : il fait confiance à l'adresse IP qui se connecte directement au conteneur, donc à Traefik. Cela convient car le conteneur n'est joignable que via le proxy de Coolify (aucun `ports:` publié).
+   Si le conteneur n'écoute pas sur le port 80, ajouter le port à la fin : `https://portfolio.app.ndlpavranches.fr:8080`.
 
-Pour restreindre davantage, on peut lister des plages d'IP, par exemple `TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`.
+2. Cliquer sur **Save**. Coolify génère le routage Traefik et le certificat Let's Encrypt.
 
-**En local aussi** : `%env(TRUSTED_PROXIES)%` exige que la variable existe, sinon Symfony lève une erreur `Environment variable not found: "TRUSTED_PROXIES"` au démarrage. Il faut donc la définir dans `.env` (valeur par défaut, committée), avec une valeur vide car il n'y a pas de proxy en local :
+3. Chez le gestionnaire DNS du domaine, créer un enregistrement de type **A** pour ce sous-domaine, pointant vers l'adresse IP du serveur Coolify.
 
-   ```
-   TRUSTED_PROXIES=
-   ```
+### 4. Déployer
 
-En production, la valeur `REMOTE_ADDR` définie dans Coolify (ou dans `environment:` du service `php`) prend le dessus sur celle de `.env`. Si besoin, une valeur locale spécifique se met dans `.env.local` (non committé).
-
-
+Cliquer sur **Deploy** (en haut de la ressource), puis suivre les logs du déploiement. Une fois terminé, le site est accessible à l'adresse du sous-domaine.
