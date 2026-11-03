@@ -275,7 +275,9 @@ Vérifier avec `git status` qu'aucun secret (`.env.local`) n'est ajouté.
 
 #### 5.5 Redéployer dans Coolify
 
-Dans la ressource Coolify, cliquer sur **Deploy** (ou **Redeploy**), puis suivre les logs du déploiement.
+Dans la ressource Coolify : 
+- dans l'onglet **General**, cliquer sur le bouton **Reload Compose file**
+- cliquer sur  le bouton **Deploy** (en haut à droite), puis suivre les logs du déploiement.
 
 - Coolify récupère le dernier commit de la branche `main`, reconstruit l'image du service `php` et redémarre les conteneurs. Les migrations sont appliquées au démarrage.
 - Le déploiement n'est pas lancé automatiquement par un `git push` : il faut cliquer sur **Deploy**.
