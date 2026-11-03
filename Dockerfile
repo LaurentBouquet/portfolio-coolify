@@ -13,6 +13,7 @@ COPY . .
 
 RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction \
     && composer dump-env prod \
+    && php bin/console importmap:install \
     && php bin/console asset-map:compile \
     && php bin/console cache:warmup \
     && mkdir -p var && chown -R www-data:www-data var

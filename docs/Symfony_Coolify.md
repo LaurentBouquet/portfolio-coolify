@@ -76,6 +76,7 @@ COPY . .
 
 RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction \
     && composer dump-env prod \
+    && php bin/console importmap:install \
     && php bin/console asset-map:compile \
     && php bin/console cache:warmup \
     && mkdir -p var && chown -R www-data:www-data var
@@ -88,7 +89,8 @@ Explications :
 
 - Image de base FrankenPHP avec PHP 8.4 et installation des extensions PHP nécessaires (`pdo_mysql` pour MariaDB).
 - `FRANKENPHP_CONFIG="worker ./public/index.php"` active le mode worker de FrankenPHP sur le point d'entrée de Symfony. `symfony/runtime` le détecte automatiquement.
-- Le build installe les dépendances sans les paquets de dev, prépare la configuration de production, compile les assets et réchauffe le cache.
+- Le build installe les dépendances sans les paquets de dev, prépare la configuration de production, télécharge les bibliothèques JavaScript (`importmap:install`), compile les assets et réchauffe le cache.
+- `importmap:install` est indispensable : `composer install --no-scripts` ne le lance pas, et le dossier `assets/vendor/` est dans le `.gitignore`, donc absent de GitHub. Sans cette commande, `asset-map:compile` échoue avec `The "@hotwired/stimulus" vendor asset is missing`.
 - Au démarrage du conteneur, les migrations Doctrine sont exécutées, puis le serveur FrankenPHP est lancé.
 
 ### 3. `.dockerignore`
@@ -184,22 +186,36 @@ Dans la ressource, onglet **Environment Variables** :
 
    | Variable | Valeur |
    |---|---|
-   | `APP_SECRET` | chaîne aléatoire (ex. générée avec `openssl rand -hex 32`) |
-   | `MARIADB_PASSWORD` | mot de passe de l'utilisateur applicatif |
-   | `MARIADB_ROOT_PASSWORD` | mot de passe root MariaDB |
+   | `APP_SECRET` | valeur aléatoire (clé secrète de Symfony) |
+   | `MARIADB_PASSWORD` | valeur aléatoire (mot de passe de l'utilisateur applicatif) |
+   | `MARIADB_ROOT_PASSWORD` | valeur aléatoire (mot de passe root MariaDB) |
+
+   Ces trois valeurs sont des secrets : chacune doit être **générée de façon aléatoire et différente des deux autres**. Ne jamais copier/coller celles d'un exemple, d'un tutoriel ou d'un autre projet, ni les committer dans Git.
+
+   Pour générer une valeur aléatoire (valable sous Windows, Linux et macOS, car PHP est déjà installé pour Symfony) :
+
+   ```sh
+   php -r "echo bin2hex(random_bytes(32));"
+   ```
+
+   Lancer la commande **une fois par variable** et copier chaque résultat dans la valeur correspondante. `openssl rand -hex 32` fait la même chose, mais `openssl` n'est pas disponible par défaut sous Windows.
+
+   Aucun besoin de retenir ces valeurs : seule l'application les utilise, et elles restent stockées dans Coolify. Le format hexadécimal évite les caractères spéciaux qui casseraient l'URL `DATABASE_URL`.
+
+   > MariaDB ne lit `MARIADB_PASSWORD` et `MARIADB_ROOT_PASSWORD` qu'à la **première création** de la base (volume vide). Les modifier ensuite dans Coolify ne change pas les mots de passe déjà enregistrés dans la base.
 
    `TRUSTED_PROXIES` (`REMOTE_ADDR`), `MARIADB_USER`, `MARIADB_DATABASE` et `MARIADB_VERSION` ont une valeur par défaut dans le `compose.yaml` : ne les définir que pour la changer.
 
-3. Cliquer sur **Save**.
+3. Pour enregistrer chaque variable, cliquer sur le bouton **Update** situé sur sa ligne. Une variable saisie mais non enregistrée avec **Update** est perdue.
 
 > Les variables ne sont prises en compte qu'au **prochain déploiement**.
 
 ### 3. Définir le sous-domaine
 
-1. Dans l'onglet **Configuration**, le champ **Domains** apparaît pour chaque service du compose. Pour le service `php`, saisir par exemple :
+1. Dans l'onglet **General**, le champ **Domains** apparaît pour chaque service du compose. Pour le service `php`, saisir par exemple :
 
    ```
-   https://portfolio.app.ndlpavranches.fr
+   https://portfolio-demo.app.ndlpavranches.fr
    ```
 
    Si le conteneur n'écoute pas sur le port 80, ajouter le port à la fin : `https://portfolio.app.ndlpavranches.fr:8080`.
@@ -211,3 +227,62 @@ Dans la ressource, onglet **Environment Variables** :
 ### 4. Déployer
 
 Cliquer sur **Deploy** (en haut de la ressource), puis suivre les logs du déploiement. Une fois terminé, le site est accessible à l'adresse du sous-domaine.
+
+### 5. MAJ du projet
+
+Après chaque modification du projet Symfony, suivre ces étapes dans l'ordre.
+
+#### 5.1 Tester en local
+
+```sh
+php bin/phpunit
+php -S localhost:8000 -t public
+```
+
+Vérifier que les tests passent et que le site fonctionne avant de pousser.
+
+#### 5.2 Si les entités Doctrine ont changé : créer la migration
+
+```sh
+php bin/console make:migration
+php bin/console doctrine:migrations:migrate
+```
+
+- Le fichier de migration généré dans `src/Migrations/` **doit être committé** : il sera exécuté automatiquement au démarrage du conteneur en production (le `CMD` du `Dockerfile` lance `doctrine:migrations:migrate`).
+- Ne jamais utiliser `doctrine:schema:update` : les modifications du schéma passent toujours par une migration.
+- Les données de la base sont conservées entre les déploiements (volume `database_data`).
+
+#### 5.3 Si des dépendances ont changé
+
+```sh
+composer require vendor/paquet
+php bin/console importmap:require nom-du-paquet-js
+```
+
+- `composer require` modifie `composer.json` et `composer.lock` : les deux fichiers doivent être committés.
+- `importmap:require` modifie `importmap.php` : ce fichier doit être committé. Le dossier `assets/vendor/` n'est **pas** committé : il est régénéré pendant le build par `importmap:install`.
+
+#### 5.4 Pousser les modifications sur GitHub
+
+```sh
+git status
+git add .
+git commit -m "Description de la modification"
+git push origin main
+```
+
+Vérifier avec `git status` qu'aucun secret (`.env.local`) n'est ajouté.
+
+#### 5.5 Redéployer dans Coolify
+
+Dans la ressource Coolify, cliquer sur **Deploy** (ou **Redeploy**), puis suivre les logs du déploiement.
+
+- Coolify récupère le dernier commit de la branche `main`, reconstruit l'image du service `php` et redémarre les conteneurs. Les migrations sont appliquées au démarrage.
+- Le déploiement n'est pas lancé automatiquement par un `git push` : il faut cliquer sur **Deploy**.
+- Si seules des variables d'environnement ont changé (onglet **Environment Variables**, bouton **Update**), aucun `git push` n'est nécessaire : cliquer directement sur **Deploy**.
+
+#### 5.6 Vérifier
+
+- Ouvrir le site à l'adresse du sous-domaine et tester la modification.
+- En cas d'erreur, consulter les logs du déploiement, puis les logs du conteneur `php` dans Coolify.
+
