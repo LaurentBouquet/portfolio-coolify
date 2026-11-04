@@ -19,4 +19,4 @@ RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interactio
     && mkdir -p var && chown -R www-data:www-data var
 
 # Migrations puis démarrage du serveur
-CMD ["sh", "-c", "php bin/console doctrine:migrations:migrate --no-interaction && frankenphp run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+CMD ["sh", "-c", "php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration && frankenphp run --config /etc/caddy/Caddyfile --adapter caddyfile"]
