@@ -208,9 +208,23 @@ git push origin main
 
 Vérifier avec `git status` qu'aucun secret (`.env.local`) n'est ajouté.
 
+Attendre la fin du `git push` **avant** de demander le redéploiement : Coolify déploie le dernier commit présent sur GitHub, pas celui de ton poste. Pour vérifier que le push est bien terminé :
 
+```sh
+git status
+```
+
+Le message doit indiquer `Your branch is up to date with 'origin/main'`.
 
 ### 5. Demander le redéploiement dans Coolify
+
+Un `git push` ne met **pas** le site à jour tout seul : le site en ligne ne change qu'après un nouveau déploiement dans Coolify. 
+
+1. Vérifier que le `git push` est terminé (étape 4 : `Your branch is up to date with 'origin/main'`).
+2. Demander à l'enseignant de **redéployer** le projet : lui indiquer l'URL du dépôt dans Github (le code est mis à jour sur la branche `main`).
+3. Attendre sa confirmation que le déploiement est terminé.
+
+> Ne pas redemander un déploiement avant d'avoir poussé le code sur GitHub sinon le déploiement est inutile et conserverait l'ancienne version.
 
 
 

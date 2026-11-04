@@ -297,6 +297,14 @@ git push origin main
 
 Vérifier avec `git status` qu'aucun secret (`.env.local`) n'est ajouté.
 
+Attendre la fin du `git push` **avant** de lancer le déploiement dans Coolify : Coolify déploie le dernier commit présent sur GitHub, pas celui de ton poste. Pour vérifier que le push est bien terminé :
+
+```sh
+git status
+```
+
+Le message doit indiquer `Your branch is up to date with 'origin/main'`.
+
 #### 5.5 Redéployer dans Coolify
 
 Dans la ressource Coolify : 
@@ -306,6 +314,7 @@ Dans la ressource Coolify :
 - Coolify récupère le dernier commit de la branche `main`, reconstruit l'image du service `php` et redémarre les conteneurs. Les migrations sont appliquées au démarrage.
 - Le déploiement n'est pas lancé automatiquement par un `git push` : il faut cliquer sur **Deploy**.
 - Si seules des variables d'environnement ont changé (onglet **Environment Variables**, bouton **Update**), aucun `git push` n'est nécessaire : cliquer directement sur **Deploy**.
+- Au début du log de déploiement, la ligne `Importing LaurentBouquet/portfolio-coolify:main (commit sha …)` indique le commit réellement déployé. Il doit correspondre au dernier commit poussé (`git log -1 --format=%H`). Sinon, le déploiement a été lancé trop tôt : relancer **Deploy**.
 
 #### 5.6 Vérifier
 
