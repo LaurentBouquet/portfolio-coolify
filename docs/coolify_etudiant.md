@@ -1,10 +1,11 @@
 # Héberger un projet Symfony dans Coolify
 
-Démarche en 3 parties, à suivre dans l'ordre :
+Démarche en 2 parties, à suivre dans l'ordre :
 
 - **A)** Adapter le projet Symfony
 - **B)** Pousser les modifications sur GitHub
-- **C)** Créer et configurer la ressource dans Coolify
+- **C)** MAJ du projet
+
 
 ---
 
@@ -50,6 +51,9 @@ volumes:
   database_data:
 ```
 
+
+<div style="page-break-before:always"></div>
+
 Explications :
 
 - `build: .` : l'image du service `php` est construite à partir du `Dockerfile` situé à la racine du projet (voir l'étape suivante).
@@ -82,7 +86,7 @@ RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interactio
     && mkdir -p var && chown -R www-data:www-data var
 
 # Migrations puis démarrage du serveur
-CMD ["sh", "-c", "php bin/console doctrine:migrations:migrate --no-interaction && frankenphp run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+CMD ["sh", "-c", "php bin/console doctrine:migrations:migrate --no-interaction --allow-no-migration && frankenphp run --config /etc/caddy/Caddyfile --adapter caddyfile"]
 ```
 
 Explications :
@@ -92,6 +96,7 @@ Explications :
 - Le build installe les dépendances sans les paquets de dev, prépare la configuration de production, télécharge les bibliothèques JavaScript (`importmap:install`), compile les assets et réchauffe le cache.
 - `importmap:install` est indispensable : `composer install --no-scripts` ne le lance pas, et le dossier `assets/vendor/` est dans le `.gitignore`, donc absent de GitHub. Sans cette commande, `asset-map:compile` échoue avec `The "@hotwired/stimulus" vendor asset is missing`.
 - Au démarrage du conteneur, les migrations Doctrine sont exécutées, puis le serveur FrankenPHP est lancé.
+- `--allow-no-migration` est nécessaire tant que le projet n'a aucune migration (dossier `src/Migrations/` vide) : sans lui, `doctrine:migrations:migrate` échoue avec `The version "latest" couldn't be reached, there are no registered migrations`, et à cause du `&&` le serveur ne démarre jamais.
 
 ### 3. `.dockerignore`
 
@@ -154,103 +159,15 @@ Explications :
 - Le dépôt doit être **public**, car la ressource Coolify est de type *Public Repository*.
 - Ne jamais committer de secrets (`.env.local`, mots de passe) : ils se définissent dans Coolify (partie C).
 
+
+
 ---
 
-## C) Procédure dans Coolify
-
-### 1. Créer la ressource
-
-1. **Projet** → choisir l'environnement (ex. *2026-sio2-portfolio*) → **+ New Resource**.
-
-2. Choisir **Public Repository**.
-
-3. Saisir l'URL du dépôt dans l'unique champ **Repository URL (https://)** :
-   `https://github.com/LaurentBouquet/portfolio-coolify`, puis valider (**Check repository**).
-
-4. Sur l'écran suivant, renseigner la configuration de la ressource :
-
-   - **Branch** : `main`
-   - **Build Pack** : **Docker Compose**
-   - **Base Directory** : `/`
-   - **Docker Compose Location** : `/compose.yaml`
-
-5. Cliquer sur **Continue** : la ressource est créée et ouverte sur sa page **Configuration**.
-
-### 2. Variables d'environnement
-
-Dans la ressource, onglet **Environment Variables** :
-
-1. Coolify détecte les `${VARIABLE}` du `compose.yaml` et les liste. Si une variable manque, cliquer sur **+ Add**.
-
-2. Renseigner la valeur de chaque variable (**Key** / **Value**) :
-
-   | Variable | Valeur |
-   |---|---|
-   | `APP_SECRET` | valeur aléatoire (clé secrète de Symfony) |
-   | `MARIADB_PASSWORD` | valeur aléatoire (mot de passe de l'utilisateur applicatif) |
-   | `MARIADB_ROOT_PASSWORD` | valeur aléatoire (mot de passe root MariaDB) |
-
-   Ces trois valeurs sont des secrets : chacune doit être **générée de façon aléatoire et différente des deux autres**. Ne jamais copier/coller celles d'un exemple, d'un tutoriel ou d'un autre projet, ni les committer dans Git.
-
-   Pour générer une valeur aléatoire (valable sous Windows, Linux et macOS, car PHP est déjà installé pour Symfony) :
-
-   ```sh
-   php -r "echo bin2hex(random_bytes(32));"
-   ```
-
-   Lancer la commande **une fois par variable** et copier chaque résultat dans la valeur correspondante. `openssl rand -hex 32` fait la même chose, mais `openssl` n'est pas disponible par défaut sous Windows.
-
-   Aucun besoin de retenir ces valeurs : seule l'application les utilise, et elles restent stockées dans Coolify. Le format hexadécimal évite les caractères spéciaux qui casseraient l'URL `DATABASE_URL`.
-
-   > MariaDB ne lit `MARIADB_PASSWORD` et `MARIADB_ROOT_PASSWORD` qu'à la **première création** de la base (volume vide). Les modifier ensuite dans Coolify ne change pas les mots de passe déjà enregistrés dans la base.
-
-   `TRUSTED_PROXIES` (`REMOTE_ADDR`), `MARIADB_USER`, `MARIADB_DATABASE` et `MARIADB_VERSION` ont une valeur par défaut dans le `compose.yaml` : ne les définir que pour la changer.
-
-   > ATTENTION : Saisir la valeur aléatoire à droite du nom de la variable (pas dans le champ `Comment`) dans le champ avec un oeil.
-
-3. Pour enregistrer chaque variable, cliquer sur le bouton **Update** situé sur sa ligne. Une variable saisie mais non enregistrée avec **Update** est perdue.
-
-> Les variables ne sont prises en compte qu'au **prochain déploiement**.
-
-### 3. Définir le sous-domaine
-
-1. Dans l'onglet **General**, le champ **Domains** apparaît pour chaque service du compose. Pour le service `php`, saisir par exemple :
-
-   ```
-   https://portfolio-demo.app.ndlpavranches.fr
-   ```
-
-   Si le conteneur n'écoute pas sur le port 80, ajouter le port à la fin : `https://portfolio.app.ndlpavranches.fr:8080`.
-
-2. Cliquer sur **Save**. Coolify génère le routage Traefik et le certificat Let's Encrypt.
-
-3. Chez le gestionnaire DNS du domaine, créer un enregistrement de type **A** pour ce sous-domaine, pointant vers l'adresse IP du serveur Coolify.
-
-### 4. Déployer
-
-Cliquer sur **Deploy** (en haut de la ressource), puis suivre les logs du déploiement. Une fois terminé, le site est accessible à l'adresse du sous-domaine.
-
-#### Dépannage : « dependency failed to start: container database … is unhealthy »
-
-Ouvrir les logs du conteneur `database` (onglet **Logs** de la ressource). Si on y lit :
-
-```
-Database is uninitialized and password option is not specified
-```
-
-alors `MARIADB_ROOT_PASSWORD` (ou `MARIADB_PASSWORD`) est **vide ou absent** : MariaDB refuse de démarrer sans mot de passe. Pour corriger :
-
-1. Onglet **Environment Variables** : vérifier que `MARIADB_ROOT_PASSWORD`, `MARIADB_PASSWORD` et `APP_SECRET` ont chacune une **valeur** (voir C, étape 2).
-2. Cliquer sur **Update** sur chaque ligne modifiée.
-3. Cliquer de nouveau sur **Deploy**.
-
-Si le conteneur `database` a déjà démarré une fois avec de mauvais mots de passe, supprimer le volume `database_data` de la ressource avant de redéployer (MariaDB ne relit les mots de passe qu'à la première initialisation). Attention : cela efface les données de la base.
-
-### 5. MAJ du projet
+## C) MAJ du projet
 
 Après chaque modification du projet Symfony, suivre ces étapes dans l'ordre.
 
-#### 5.1 Tester en local
+### 1. Tester en local
 
 ```sh
 php bin/phpunit
@@ -259,7 +176,7 @@ php -S localhost:8000 -t public
 
 Vérifier que les tests passent et que le site fonctionne avant de pousser.
 
-#### 5.2 Si les entités Doctrine ont changé : créer la migration
+### 2. Si les entités Doctrine ont changé : créer la migration
 
 ```sh
 php bin/console make:migration
@@ -270,7 +187,7 @@ php bin/console doctrine:migrations:migrate
 - Ne jamais utiliser `doctrine:schema:update` : les modifications du schéma passent toujours par une migration.
 - Les données de la base sont conservées entre les déploiements (volume `database_data`).
 
-#### 5.3 Si des dépendances ont changé
+### 3. Si des dépendances ont changé
 
 ```sh
 composer require vendor/paquet
@@ -280,7 +197,7 @@ php bin/console importmap:require nom-du-paquet-js
 - `composer require` modifie `composer.json` et `composer.lock` : les deux fichiers doivent être committés.
 - `importmap:require` modifie `importmap.php` : ce fichier doit être committé. Le dossier `assets/vendor/` n'est **pas** committé : il est régénéré pendant le build par `importmap:install`.
 
-#### 5.4 Pousser les modifications sur GitHub
+### 4. Pousser les modifications sur GitHub
 
 ```sh
 git status
@@ -291,18 +208,14 @@ git push origin main
 
 Vérifier avec `git status` qu'aucun secret (`.env.local`) n'est ajouté.
 
-#### 5.5 Redéployer dans Coolify
 
-Dans la ressource Coolify : 
-- dans l'onglet **General**, cliquer sur le bouton **Reload Compose file**
-- cliquer sur  le bouton **Deploy** (en haut à droite), puis suivre les logs du déploiement.
 
-- Coolify récupère le dernier commit de la branche `main`, reconstruit l'image du service `php` et redémarre les conteneurs. Les migrations sont appliquées au démarrage.
-- Le déploiement n'est pas lancé automatiquement par un `git push` : il faut cliquer sur **Deploy**.
-- Si seules des variables d'environnement ont changé (onglet **Environment Variables**, bouton **Update**), aucun `git push` n'est nécessaire : cliquer directement sur **Deploy**.
+### 5. Demander le redéploiement dans Coolify
 
-#### 5.6 Vérifier
 
-- Ouvrir le site à l'adresse du sous-domaine et tester la modification.
-- En cas d'erreur, consulter les logs du déploiement, puis les logs du conteneur `php` dans Coolify.
+
+### 6. Vérifier
+
+Ouvrir le site à l'adresse du sous-domaine et tester la modification.
+
 
